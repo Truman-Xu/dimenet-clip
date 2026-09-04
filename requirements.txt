@@ -1,0 +1,29 @@
+# Core training / evaluation environment for DimeNetCLIP.
+# Install PyTorch + CUDA separately (version depends on your GPU driver),
+# then PyTorch Geometric and its optional wheels (torch-scatter, torch-sparse,
+# torch-cluster) matched to that PyTorch/CUDA build — see
+# https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html
+
+torch-geometric==2.7.0
+
+# Chemistry / structural biology
+rdkit==2024.9.6
+biopython==1.86
+# crimm is used only by data_prep/*.py and the eval notebooks (periodic-table
+# lookup, PDB parsing, topology building)
+crimm
+
+# Data / ML
+numpy==2.2.6
+scipy==1.17.0
+scikit-learn==1.8.0
+pandas==3.0.0
+torchmetrics==1.8.2
+lmdb
+
+# Notebooks / plotting
+matplotlib==3.10.8
+seaborn
+jupyter
+
+tqdm
