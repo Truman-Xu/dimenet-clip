@@ -1,63 +1,20 @@
 # DimeNetCLIP
 
-Code, evaluation notebooks, and model weights for a DimeNet-based joint
-ligand–pocket embedding model, trained with a CLIP-style contrastive
-objective for protein–ligand binding affinity / virtual screening. This
-repository accompanies the accompanying manuscript's Methods section and
-implements its five-stage pipeline:
+DimeNetCLIP is a joint ligand–pocket embedding model for protein–ligand
+binding: a [DimeNet](https://arxiv.org/abs/2003.03123) 3D graph neural
+network encodes a small-molecule ligand and a protein binding pocket into a
+shared latent space, trained with a CLIP-style contrastive objective so that
+binders end up close together and non-binders end up far apart. The
+similarity between a ligand embedding and a pocket embedding is a
+binding/affinity score, useful for virtual screening and pose/compound
+ranking.
 
-1. **Ligand structure data preparation** — sample and serialize ligand
-   conformers from a Uni-Mol ligand LMDB database.
-2. **Pocket structure data preparation** — serialize protein pocket
-   structures from Uni-Mol pocket LMDB databases.
-3. **Self-supervised denoising pre-training** — pre-train the DimeNet
-   backbone (ligand and pocket domains, separately) with a coordinate
-   denoising / implicit force-matching objective, initialized from a
-   QM9-pretrained backbone.
-4. **Contrastive pre-training on SAIR** — train a joint ligand–pocket
-   DimeNetCLIP model with an affinity-weighted, unique-protein-per-batch
-   CLIP objective on a large affinity-labeled dataset.
-5. **Contrastive fine-tuning on PDBBind** — fine-tune the SAIR-pretrained
-   model on PDBBind.
-
-See the manuscript's Methods section for the full mathematical description
-of each stage (noise schedule, loss functions, batch sampling, optimizer
-settings, etc.); this README covers how to run the code.
-
-## Repository layout
-
-```
-dimenet_clip.py                    # Model code: DimeNetBackbone, DimeNetReadout,
-                                    # DimeNetCLIP, SigmoidWeightedCLIPLoss,
-                                    # DimeNetPretrainer + denoising loss, all-gather utils
-
-data_prep/
-  ligand_prep.py                   # Stage 1
-  pocket_prep.py                   # Stage 2
-  atom_name_table.txt              # PDB atom-nomenclature reference table used by pocket_prep.py
-  qm9_pretrain.py                  # Extracts the QM9-pretrained backbone/readout init
-                                    # used by train_denoising.py (see weights/qm9_pretrained)
-
-train_denoising.py                 # Stage 3
-train_clip_dimenet_sair.py         # Stage 4
-train_clip_dimenet_pdbbind.py      # Stage 5
-
-eval/
-  dude_eval.ipynb                  # DUDE virtual-screening benchmark (AUC / enrichment factor)
-  lit_pcba_eval.ipynb              # LIT-PCBA benchmark (notebook version)
-  lit_pcba_eval.py                 # LIT-PCBA benchmark (script version, argparse)
-  lit_pcba_labels_prep.ipynb       # Builds the LIT-PCBA evaluation pickles from docked poses
-  eval_denoising.ipynb             # Sanity-checks the denoising-pretrained backbones
-
-slurm/                             # Example SLURM job scripts for each stage above
-                                    # (edit the #SBATCH directives and paths for your cluster)
-
-weights/                           # Published checkpoints (see "Model weights" below)
-```
 
 ## Installation
 
 ```bash
+git clone <this-repo-url>
+cd dimenet-clip
 pip install -r requirements.txt
 ```
 
@@ -66,101 +23,104 @@ PyTorch and PyTorch Geometric's optional wheels (`torch-scatter`,
 your CUDA version — see the [PyG install
 guide](https://pytorch-geometric.readthedocs.io/en/latest/install/installation.html).
 
-`data_prep/ligand_prep.py`, `data_prep/pocket_prep.py`, and the evaluation
-notebooks also depend on
-[`crimm`](https://crimm.readthedocs.io/) (periodic-table lookup, PDB
-parsing, topology building), which is included in `requirements.txt`.
-
-## Data and datasets
-
-**No training data is bundled in this repository** — the denoising
-pre-training corpus (millions of ligand/pocket conformers) and the SAIR /
-PDBBind contrastive-training datasets are far too large to publish here.
-Every script takes the relevant data path(s) as required command-line
-arguments; point them at your own copies:
-
-| Stage | Script | Data argument(s) |
-|---|---|---|
-| 1. Ligand prep | `data_prep/ligand_prep.py` | `--lmdb_dir`, `--output_dir` |
-| 2. Pocket prep | `data_prep/pocket_prep.py` | `--lmdb_dir`, `--output_dir` |
-| 3. Denoising pre-training | `train_denoising.py` | `--dataset_path` (output of stage 1/2) |
-| 4. SAIR CLIP pre-training | `train_clip_dimenet_sair.py` | `--data_path` |
-| 5. PDBBind CLIP fine-tuning | `train_clip_dimenet_pdbbind.py` | `--data_path` |
-| DUDE / LIT-PCBA evaluation | `eval/*.ipynb`, `eval/lit_pcba_eval.py` | paths set in a config cell / `--data_path` |
-
-Raw source data (Uni-Mol ligand/pocket LMDB databases, SAIR, PDBBind, DUDE,
-LIT-PCBA) must be obtained separately from their respective providers.
-
-Note on stage 3 input naming: `train_denoising.py`'s single-process `train()`
-path reads `h_{name}_pos_train.pkl` / `h_z_{name}_train.pkl` (the direct
-output of `ligand_prep.py` / `pocket_prep.py` with hydrogens retained), while
-its multi-GPU `ddp_train()` path (used for the reported runs) reads
-`{name}_pos.pkl` / `z_{name}.pkl` from the same `--dataset_path` directory —
-name your training split accordingly depending on which entry point you use.
+Tested with Python ≥3.10, PyTorch Geometric 2.7, and a CUDA-capable GPU (CPU
+also works for inference on small inputs, just pass `device='cpu'` below).
 
 ## Model weights
 
-Full checkpoint histories (up to 100 epochs per stage, ~1.8 GB per stage)
-are not published here. `weights/` instead contains one representative
-checkpoint per stage:
+Pretrained checkpoints are included in [`weights/`](weights/). For
+inference / scoring, use the fully fine-tuned model:
 
-| Directory | Contents | Notes |
-|---|---|---|
-| `weights/qm9_pretrained/` | `backbone_U.pt`, `readout_U.pt` | QM9-pretrained DimeNet, split into backbone/readout (initialization for Stage 3). Reproduce with `data_prep/qm9_pretrain.py`. |
-| `weights/denoising_ligand/` | `backbone_epoch_29.pt`, `ener_readout_epoch_29.pt` | Ligand-domain denoising pre-training, final saved epoch. |
-| `weights/denoising_pocket/` | `backbone_epoch_26.pt`, `ener_readout_epoch_26.pt` | Pocket-domain denoising pre-training, final saved epoch (unfrozen readout, lr=1e-6, as reported). |
-| `weights/clip_sair_pretrained/` | `dimenet_clip_epoch_98.pth`, `val_losses.npy` | SAIR contrastive pre-training, best validation-loss epoch (98/99, val loss 0.885). |
-| `weights/clip_pdbbind_finetuned/` | `dimenet_clip_epoch_2.pth`, `val_losses.npy` | PDBBind contrastive fine-tuning checkpoint used for the DUDE / LIT-PCBA evaluation notebooks in this repo (val loss 392.6; from a short 6-epoch run — see caveat below). |
+| Checkpoint | Use it for |
+| --- | --- |
+| `weights/clip_pdbbind_finetuned/dimenet_clip_epoch_2.pth` | Ligand–pocket scoring / virtual screening (used for the benchmark results below) |
+| `weights/clip_sair_pretrained/dimenet_clip_epoch_98.pth` | Earlier-stage checkpoint, contrastively pre-trained on SAIR only |
 
-All `.pth` DimeNetCLIP checkpoints are plain `state_dict`s (already unwrapped
-from `DistributedDataParallel`) and load directly with
-`model.load_state_dict(torch.load(path))`.
 
-**Caveat on `clip_pdbbind_finetuned`:** several PDBBind fine-tuning runs with
-different ablation settings were produced during development. The checkpoint
-published here is the one the DUDE/LIT-PCBA evaluation notebooks in `eval/`
-were actually run against. A separate, fully-converged 100-epoch run (best
-validation loss 94.5 at epoch 51) also exists; if you are trying to
-reproduce a specific number from the manuscript and it doesn't match, this
-is the first place to check.
+## Quickstart: score a ligand against a pocket
 
-## Running the pipeline
+```python
+import torch
+from torch_geometric.data import Data, Batch
+from dimenet_clip import DimeNetCLIP
 
-```bash
-# 1. Ligand data prep
-python data_prep/ligand_prep.py --lmdb_dir /path/to/unimol/ligands --output_dir /path/to/ligand_data
+device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-# 2. Pocket data prep
-python data_prep/pocket_prep.py --lmdb_dir /path/to/unimol/pockets --output_dir /path/to/pocket_data
+model = DimeNetCLIP(hidden_channels=128, out_channels=128, num_blocks=6,
+                     use_conformers=False)
+state_dict = torch.load(
+    'weights/clip_pdbbind_finetuned/dimenet_clip_epoch_2.pth',
+    map_location=device,
+)
+# Checkpoints were saved from DistributedDataParallel; strip the prefix.
+state_dict = {k.removeprefix('module.'): v for k, v in state_dict.items()}
+model.load_state_dict(state_dict)
+model.to(device).eval()
 
-# 3. Denoising pre-training (single GPU)
-python train_denoising.py --name pocket --dataset_path /path/to/pocket_data \
-    --qm9_weights_dir weights/qm9_pretrained --unfreeze_readout --lr 1e-6 --batch_size 8
+# z: atomic numbers (LongTensor), pos: 3D coordinates in Angstroms (FloatTensor)
+ligand = Data(z=ligand_z, pos=ligand_pos).to(device)
+pocket = Data(z=pocket_z, pos=pocket_pos).to(device)
 
-# 4. CLIP pre-training on SAIR (multi-GPU DDP; see slurm/submit_clip_train_sair.sh)
-python train_clip_dimenet_sair.py --data_path /path/to/sair_preprocessed.pkl \
-    --pocket_backbone_path weights/denoising_pocket/backbone_epoch_26.pt \
-    --ligand_backbone_path weights/denoising_ligand/backbone_epoch_29.pt \
-    --freeze_ligand --world_size 8
+with torch.no_grad():
+    ligand_batch = Batch.from_data_list([ligand])
+    pocket_batch = Batch.from_data_list([pocket])
+    v_ligand = model.encode_ligand(ligand_batch.z, ligand_batch.pos, ligand_batch.batch)
+    v_pocket = model.encode_pocket(pocket_batch.z, pocket_batch.pos, pocket_batch.batch)
 
-# 5. CLIP fine-tuning on PDBBind (multi-GPU DDP; see slurm/submit_clip_train_pdbbind.sh)
-python train_clip_dimenet_pdbbind.py --data_path /path/to/pdbbind_preprocessed.pkl \
-    --load_weight_path weights/clip_sair_pretrained/dimenet_clip_epoch_98.pth --world_size 8
+score = (v_ligand @ v_pocket.T).item()  # higher = more likely to bind
 ```
 
-See `slurm/` for complete example job scripts matching the hyperparameters
-reported in the manuscript.
+`encode_ligand`/`encode_pocket` accept PyG-style batches, so you can encode
+many ligands or pockets in one call by batching several `Data` objects
+together and ranking rows of the resulting similarity matrix — this is what
+the benchmark evaluation below does.
 
-## Evaluation
+## Reproducing the benchmark figure
 
-`eval/dude_eval.ipynb` and `eval/lit_pcba_eval.{ipynb,py}` load a
-DimeNetCLIP checkpoint, encode a benchmark's ligands/pockets, and report
-ROC-AUC and enrichment factor per target. `eval/lit_pcba_labels_prep.ipynb`
-shows how the LIT-PCBA input pickles are built from docked poses.
-`eval/eval_denoising.ipynb` sanity-checks the denoising-pretrained backbones
-before they're used to initialize Stage 4. Edit the configuration cell at
-the top of each notebook (or the `--model_dir`/`--data_path` flags of
-`lit_pcba_eval.py`) to point at your local copies of the benchmark data.
+[`eval/dude_eval.ipynb`](eval/dude_eval.ipynb) loads the released
+`clip_pdbbind_finetuned` checkpoint, encodes every ligand and pocket in the
+[DUD-E](http://dude.docking.org/) virtual-screening benchmark, ranks ligands
+by predicted score against each target's pocket, and reports ROC-AUC / 1%
+enrichment factor per target, plus a per-target recall curve (cumulative
+actives recovered vs. number of top-ranked predictions, against the
+chance-level diagonal) — the main results figure for this model.
+
+To reproduce it:
+
+1. Obtain DUD-E separately (not bundled here — see the [DUD-E
+   website](http://dude.docking.org/)) and preprocess it into two pickles:
+   - a pocket pickle: `{target: (z_pocket, pocket_pos)}`
+   - a ligand pickle: `{target: [(z_ligand, ligand_pos, label), ...]}`
+     (`label` is 1 for an active, 0 for a decoy)
+2. Open `eval/dude_eval.ipynb` and edit the configuration cell at the top:
+   ```python
+   DUDE_POCKET_PKL = '/path/to/dude-pocket-4.pkl'
+   DUDE_LIGAND_PKL = '/path/to/dude-ligand-z-pos.pkl'
+   MODEL_DIR = '../weights/clip_pdbbind_finetuned'
+   MODEL_EPOCH = 2
+   ```
+3. Run all cells. The "Results" section prints mean/max/min AUC and EF1
+   across targets, and plots the per-target recall curve.
+
+[`eval/lit_pcba_eval.py`](eval/lit_pcba_eval.py) (and its notebook
+counterpart) runs the same scoring/ranking procedure on the
+[LIT-PCBA](https://drugdesign.unistra.fr/LIT-PCBA/) benchmark instead:
+
+```bash
+python eval/lit_pcba_eval.py \
+    --model_dir weights/clip_pdbbind_finetuned --epoch 2 \
+    --data_path /path/to/pcba_sep_pocket_vecs.pkl
+```
+
+`eval/lit_pcba_labels_prep.ipynb` shows how that input pickle is built from
+docked poses.
+
+## Retraining or reproducing the manuscript's numbers exactly
+
+The full five-stage training pipeline (ligand/pocket data prep, denoising
+pre-training, SAIR contrastive pre-training, PDBBind fine-tuning), SLURM job
+scripts, and per-checkpoint provenance notes are documented in
+[README_Internal.md](README_Internal.md).
 
 ## License
 
