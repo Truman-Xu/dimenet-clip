@@ -120,7 +120,7 @@ docked poses.
 The full five-stage training pipeline (ligand/pocket data prep, denoising
 pre-training, SAIR contrastive pre-training, PDBBind fine-tuning), SLURM job
 scripts, and per-checkpoint provenance notes are documented in
-[README_Internal.md](README_Internal.md).
+[TRAINING.md](TRAINING.md).
 
 ## License
 
