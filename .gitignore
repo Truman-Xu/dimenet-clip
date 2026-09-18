@@ -1,1 +1,6 @@
-TOC
+TOC/
+
+# default locations used by plots/paths.py (benchmark data, embeddings, results)
+data/
+encodings/
+plots/output/

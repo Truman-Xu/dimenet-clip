@@ -106,7 +106,7 @@ def main():
     parser.add_argument("--output-dir", default=str(paths.out("lit-pcba", "clip_vs_screening_analysis")))
     args = parser.parse_args()
 
-    paths = {
+    summary_csvs = {
         ("Fingerprint search", "DUD-E"): args.fp_dude,
         ("Fingerprint search", "LIT-PCBA"): args.fp_litpcba,
         ("DimeNet-CLIP", "DUD-E"): args.clip_dude,
@@ -117,7 +117,7 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
 
     rows = []
-    for (method, dataset), path in paths.items():
+    for (method, dataset), path in summary_csvs.items():
         df = pd.read_csv(path)
         rows.append({
             "method": method,

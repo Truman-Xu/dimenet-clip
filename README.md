@@ -128,6 +128,13 @@ python eval/lit_pcba_eval.py \
     --data_path /path/to/pcba_sep_pocket_vecs.pkl
 ```
 
+## Reproducing the manuscript figures
+
+[`plots/`](plots/) contains the scripts behind every data-driven figure in the
+manuscript and Table 1, with a driver that runs them in order
+(`plots/make_all.sh`). See [plots/README.md](plots/README.md) for the
+figure-to-script map and the inputs each figure needs.
+
 ## Retraining or reproducing the manuscript's numbers exactly
 
 The full five-stage training pipeline (ligand/pocket data prep, denoising

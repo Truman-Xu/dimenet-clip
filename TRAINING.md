@@ -48,6 +48,10 @@ eval/
   lit_pcba_eval.py                 # LIT-PCBA benchmark (script version, argparse)
   lit_pcba_labels_prep.ipynb       # Builds the LIT-PCBA evaluation pickles from docked poses
   eval_denoising.ipynb             # Sanity-checks the denoising-pretrained backbones
+  encode_benchmarks.py             # Writes DUD-E / LIT-PCBA embeddings consumed by plots/
+
+plots/                             # Reproduces every data-driven manuscript figure and
+                                    # Table 1 (see plots/README.md; run plots/make_all.sh)
 
 slurm/                             # Example SLURM job scripts for each stage above
                                     # (edit the #SBATCH directives and paths for your cluster)
