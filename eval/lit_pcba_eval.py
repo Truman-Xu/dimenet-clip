@@ -6,7 +6,7 @@ Input data format (pcba_sep_pocket_vecs.pkl):
   {target: {(pdb_id, ligand_id): {z_lig, lig_pos, z_pocket, pocket_pos, label}}}
 
 Usage:
-  python lit_pcba_eval.py --model_dir ../weights/clip_pdbbind_finetuned --epoch 51 \
+  python lit_pcba_eval.py --model_dir ../weights/clip_pdbbind_finetuned --epoch 3 \
       --data_path /path/to/pcba_sep_pocket_vecs.pkl
 """
 
@@ -81,13 +81,17 @@ def main():
     parser.add_argument(
         '--model_dir', required=True,
         help='Directory containing dimenet_clip_epoch_{epoch}.pth, e.g. weights/clip_pdbbind_finetuned')
-    parser.add_argument('--epoch', type=int, default=51, help='Checkpoint epoch to load (see --model_dir)')
+    parser.add_argument('--epoch', type=int, required=True,
+                        help='Checkpoint epoch to load (argmin of --model_dir/val_losses.npy)')
     parser.add_argument(
         '--data_path', required=True,
         help='Path to a preprocessed LIT-PCBA pickle: {target: {(pdb_id, ligand_id): '
              '{z_lig, lig_pos, z_pocket, pocket_pos, label}}}')
     parser.add_argument('--device', default='cuda')
     parser.add_argument('--batch_size', type=int, default=32)
+    parser.add_argument('--output_dir', type=str, default=None,
+                        help='Where to write encodings with --save_encodings '
+                             '(default: alongside --data_path)')
     parser.add_argument('--save_encodings', action='store_true',
                         help='Save pocket/ligand encodings to pickle files')
     args = parser.parse_args()
@@ -129,11 +133,16 @@ def main():
             lig_encoded[t] = {'emb': cur_encoded, 'labels': labels}
 
     if args.save_encodings:
-        out_dir = os.path.dirname(args.data_path)
-        with open(os.path.join(out_dir, f'sep_pocket_encoded_ep{args.epoch}.pkl'), 'wb') as f:
+        out_dir = args.output_dir or os.path.dirname(args.data_path)
+        os.makedirs(out_dir, exist_ok=True)
+        pocket_out = os.path.join(out_dir, f'lit_pocket_encoded_ep{args.epoch}.pkl')
+        ligand_out = os.path.join(out_dir, f'lit_ligand_encoded_ep{args.epoch}.pkl')
+        with open(pocket_out, 'wb') as f:
             pickle.dump(prot_encoded, f)
-        with open(os.path.join(out_dir, f'sep_ligand_encoded_ep{args.epoch}.pkl'), 'wb') as f:
+        with open(ligand_out, 'wb') as f:
             pickle.dump(lig_encoded, f)
+        print(f'Wrote {pocket_out}')
+        print(f'Wrote {ligand_out}')
         print("Encodings saved.\n")
 
     # Compute similarity scores and metrics

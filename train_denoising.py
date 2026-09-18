@@ -70,14 +70,15 @@ def train(args):
     batch_size = args.batch_size
     data_dir = args.dataset_path
     mol_type = args.name
-    with open(os.path.join(data_dir, f'h_{mol_type}_pos_train.pkl'), 'rb') as f:
+    prefix = args.file_prefix
+    with open(os.path.join(data_dir, f'{prefix}{mol_type}_pos_train.pkl'), 'rb') as f:
         pocket_pos_list = pickle.load(f)
-    with open(os.path.join(data_dir, f'h_z_{mol_type}_train.pkl'), 'rb') as f:
+    with open(os.path.join(data_dir, f'{prefix}z_{mol_type}_train.pkl'), 'rb') as f:
         z_pocket_list = pickle.load(f)
 
-    with open(os.path.join(data_dir, f'{mol_type}_pos_valid.pkl'), 'rb') as f:
+    with open(os.path.join(data_dir, f'{prefix}{mol_type}_pos_valid.pkl'), 'rb') as f:
         valid_pocket_pos_list = pickle.load(f)
-    with open(os.path.join(data_dir, f'z_{mol_type}_valid.pkl'), 'rb') as f:
+    with open(os.path.join(data_dir, f'{prefix}z_{mol_type}_valid.pkl'), 'rb') as f:
         valid_z_pocket_list = pickle.load(f)
     # n_train = int(4e6)
     # valid_pocket_pos_list = pocket_pos_list[n_train:]
@@ -110,6 +111,12 @@ def train(args):
     )
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=5)
 
+    start_epoch = 0
+    if args.resume:
+        start_epoch = load_training_state(args.save_dir, model, optimizer, scheduler)
+        if start_epoch:
+            print(f"Resuming from epoch {start_epoch}")
+
     # --- C. Training Loop ---
     
     print("Starting Pre-training...")
@@ -133,7 +140,7 @@ def train(args):
             loss.backward()
             
             # Gradient Clipping (Important for geometric gradients)
-            torch.nn.utils.clip_grad_norm_(training_weights, max_norm=10.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=10.0)
             
             optimizer.step()
             
@@ -158,6 +165,7 @@ def train(args):
             torch.save(model.backbone.state_dict(), save_path)
             save_path = f"{args.save_dir}/ener_readout_epoch_{epoch}.pt"
             torch.save(model.energy_readout.state_dict(), save_path)
+            save_training_state(args.save_dir, epoch, model, optimizer, scheduler)
             print(f"Saved pre train model to {save_path}")
 
 def ddp_setup(rank: int, world_size: int):
@@ -173,15 +181,15 @@ def ddp_setup(rank: int, world_size: int):
     # initialize the process group
     init_process_group(backend="nccl", rank=rank, world_size=world_size)
 
-def get_dataloader(data_dir, mol_type, rank, batch_size, world_size, test_run=False):
-    with open(os.path.join(data_dir, f'{mol_type}_pos.pkl'), 'rb') as f:
+def get_dataloader(data_dir, mol_type, rank, batch_size, world_size, test_run=False, prefix=''):
+    with open(os.path.join(data_dir, f'{prefix}{mol_type}_pos_train.pkl'), 'rb') as f:
         pocket_pos_list = pickle.load(f)
-    with open(os.path.join(data_dir, f'z_{mol_type}.pkl'), 'rb') as f:
+    with open(os.path.join(data_dir, f'{prefix}z_{mol_type}_train.pkl'), 'rb') as f:
         z_pocket_list = pickle.load(f)
 
-    with open(os.path.join(data_dir, f'{mol_type}_pos_valid.pkl'), 'rb') as f:
+    with open(os.path.join(data_dir, f'{prefix}{mol_type}_pos_valid.pkl'), 'rb') as f:
         valid_pocket_pos_list = pickle.load(f)
-    with open(os.path.join(data_dir, f'z_{mol_type}_valid.pkl'), 'rb') as f:
+    with open(os.path.join(data_dir, f'{prefix}z_{mol_type}_valid.pkl'), 'rb') as f:
         valid_z_pocket_list = pickle.load(f)
     
     # n_train = int(4e6)
@@ -231,7 +239,8 @@ def ddp_train(rank, args):
     if args.test_run:
         epochs = 2
     train_loader, val_loader = get_dataloader(
-        args.dataset_path, args.name, rank, args.batch_size, world_size, test_run=args.test_run
+        args.dataset_path, args.name, rank, args.batch_size, world_size,
+        test_run=args.test_run, prefix=args.file_prefix
     )
 
     model = DimeNetPretrainer(
@@ -252,10 +261,20 @@ def ddp_train(rank, args):
     )
     warmup_scheduler = LinearLR(optimizer, start_factor=0.01, total_iters=1000)
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', factor=0.5, patience=10)
-    
-    for epoch in tqdm(range(epochs), desc="Overall Training Progress", disable=rank!=0):
+
+    start_epoch = 0
+    if args.resume:
+        start_epoch = load_training_state(
+            args.save_dir, model, optimizer, scheduler, warmup_scheduler,
+            map_location={'cuda:0': f'cuda:{rank}'},
+        )
+        if rank == 0 and start_epoch:
+            print(f"Resuming from epoch {start_epoch}")
+    torch.distributed.barrier()
+
+    for epoch in tqdm(range(start_epoch, epochs), desc="Overall Training Progress", disable=rank!=0):
         batch_progress_bar = tqdm(train_loader, disable=rank!=0, desc=f"Epoch {epoch+1}/{args.epochs}")
-        # train_loader.sampler.set_epoch(epoch)
+        train_loader.sampler.set_epoch(epoch)
         model.train()
         train_loss = 0.0
         nan_check = 0
@@ -278,7 +297,7 @@ def ddp_train(rank, args):
             loss.backward()
             
             # Gradient Clipping (Important for geometric gradients)
-            torch.nn.utils.clip_grad_norm_(training_weights, max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             
             optimizer.step()
             
@@ -329,9 +348,41 @@ def ddp_train(rank, args):
             torch.save(model.module.backbone.state_dict(), save_path)
             save_path = f"{args.save_dir}/ener_readout_epoch_{epoch}.pt"
             torch.save(model.module.energy_readout.state_dict(), save_path)
+            save_training_state(args.save_dir, epoch, model, optimizer, scheduler, warmup_scheduler)
             print(f"Saved pre train model to {save_path}")
 
     destroy_process_group()
+
+def save_training_state(save_dir, epoch, model, optimizer, scheduler, warmup_scheduler=None):
+    """Full training state, so a wall-clock kill can be resumed exactly."""
+    module = model.module if hasattr(model, 'module') else model
+    state = {
+        'epoch': epoch,
+        'model': module.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'scheduler': scheduler.state_dict(),
+    }
+    if warmup_scheduler is not None:
+        state['warmup_scheduler'] = warmup_scheduler.state_dict()
+    tmp_path = os.path.join(save_dir, 'last_checkpoint.pt.tmp')
+    torch.save(state, tmp_path)
+    os.replace(tmp_path, os.path.join(save_dir, 'last_checkpoint.pt'))
+
+
+def load_training_state(save_dir, model, optimizer, scheduler, warmup_scheduler=None, map_location=None):
+    """Restore from last_checkpoint.pt. Returns the epoch to start from (0 if none)."""
+    ckpt_path = os.path.join(save_dir, 'last_checkpoint.pt')
+    if not os.path.exists(ckpt_path):
+        return 0
+    state = torch.load(ckpt_path, map_location=map_location, weights_only=False)
+    module = model.module if hasattr(model, 'module') else model
+    module.load_state_dict(state['model'])
+    optimizer.load_state_dict(state['optimizer'])
+    scheduler.load_state_dict(state['scheduler'])
+    if warmup_scheduler is not None and 'warmup_scheduler' in state:
+        warmup_scheduler.load_state_dict(state['warmup_scheduler'])
+    return state['epoch'] + 1
+
 
 # ==============================================================================
 # 4. Entry Point
@@ -346,9 +397,13 @@ if __name__ == "__main__":
         help=(
             'Directory containing the ligand/pocket denoising data produced by '
             'data_prep/ligand_prep.py or data_prep/pocket_prep.py '
-            '(h_{name}_pos_train.pkl, h_z_{name}_train.pkl, {name}_pos_valid.pkl, '
-            'z_{name}_valid.pkl)'))
+            '({prefix}{name}_pos_train.pkl, {prefix}z_{name}_train.pkl, '
+            '{prefix}{name}_pos_valid.pkl, {prefix}z_{name}_valid.pkl, '
+            'where prefix comes from --file_prefix)'))
     parser.add_argument('--name', type=str, default='ligand', help='ligand or pocket')
+    parser.add_argument(
+        '--file_prefix', type=str, default='',
+        help="Prefix on the data filenames; 'h_' for hydrogen-bearing prep, '' for --remove_hs prep")
     parser.add_argument(
         '--qm9_weights_dir', type=str, required=True,
         help='Directory with QM9-pretrained backbone_U.pt / readout_U.pt (see weights/qm9_pretrained)')
@@ -362,7 +417,12 @@ if __name__ == "__main__":
     parser.add_argument('--batch_size', type=int, default=16)
     parser.add_argument('--lr', type=float, default=1e-6)
     parser.add_argument('--noise_std', type=float, default=0.1, help='Standard deviation of noise to inject')
-    # parser.add_argument('--save_dir', type=str, default='./denoise_models', help='Directory to save backbone checkpoints')
+    parser.add_argument(
+        '--save_dir', type=str, default=None,
+        help='Directory to save backbone checkpoints (default: ./{name}_models)')
+    parser.add_argument(
+        '--resume', action='store_true',
+        help='Resume from {save_dir}/last_checkpoint.pt if it exists')
     parser.add_argument('--save_interval', type=int, default=1)
     parser.add_argument('--world_size', type=int, default=torch.cuda.device_count(), help='Number of GPUs for DDP')
     parser.add_argument('--test_run', action='store_true', help='If set, runs a quick test with a subset of data')
@@ -372,7 +432,7 @@ if __name__ == "__main__":
     )
     
     args = parser.parse_args()
-    save_dir = os.path.abspath(f"./{args.name}_models_4")
+    save_dir = os.path.abspath(args.save_dir or f"./{args.name}_models")
     os.makedirs(save_dir, exist_ok=True)
     args.save_dir = save_dir
     if args.world_size == 1:

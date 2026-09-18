@@ -33,8 +33,11 @@ inference / scoring, use the fully fine-tuned model:
 
 | Checkpoint | Use it for |
 | --- | --- |
-| `weights/clip_pdbbind_finetuned/dimenet_clip_epoch_2.pth` | Ligand–pocket scoring / virtual screening (used for the benchmark results below) |
-| `weights/clip_sair_pretrained/dimenet_clip_epoch_98.pth` | Earlier-stage checkpoint, contrastively pre-trained on SAIR only |
+| `weights/clip_pdbbind_finetuned/dimenet_clip_epoch_3.pth` | Ligand–pocket scoring / virtual screening — the model behind every DimeNet-CLIP number in the manuscript |
+| `weights/clip_sair_pretrained/dimenet_clip_epoch_5.pth` | Earlier-stage checkpoint, contrastively pre-trained on SAIR only (the checkpoint the model above was fine-tuned from) |
+
+The lineage of every checkpoint, and how it was verified, is documented in
+[`weights/PROVENANCE.md`](weights/PROVENANCE.md).
 
 
 ## Quickstart: score a ligand against a pocket
@@ -49,7 +52,7 @@ device = 'cuda' if torch.cuda.is_available() else 'cpu'
 model = DimeNetCLIP(hidden_channels=128, out_channels=128, num_blocks=6,
                      use_conformers=False)
 state_dict = torch.load(
-    'weights/clip_pdbbind_finetuned/dimenet_clip_epoch_2.pth',
+    'weights/clip_pdbbind_finetuned/dimenet_clip_epoch_3.pth',
     map_location=device,
 )
 # Checkpoints were saved from DistributedDataParallel; strip the prefix.
@@ -97,23 +100,33 @@ To reproduce it:
    DUDE_POCKET_PKL = '/path/to/dude-pocket-4.pkl'
    DUDE_LIGAND_PKL = '/path/to/dude-ligand-z-pos.pkl'
    MODEL_DIR = '../weights/clip_pdbbind_finetuned'
-   MODEL_EPOCH = 2
+   MODEL_EPOCH = 3
    ```
 3. Run all cells. The "Results" section prints mean/max/min AUC and EF1
    across targets, and plots the per-target recall curve.
 
-[`eval/lit_pcba_eval.py`](eval/lit_pcba_eval.py) (and its notebook
-counterpart) runs the same scoring/ranking procedure on the
-[LIT-PCBA](https://drugdesign.unistra.fr/LIT-PCBA/) benchmark instead:
+To reproduce the manuscript's [LIT-PCBA](https://drugdesign.unistra.fr/LIT-PCBA/)
+numbers, encode the benchmark with the hydrogen-bearing pocket and ligand
+pickles (`h_pocket_4.pkl`, `h_ligands.pkl`) that
+`eval/lit_pcba_labels_prep.ipynb` builds from docked poses:
+
+```bash
+python eval/encode_benchmarks.py --dataset litpcba --out_prefix lit \
+    --model_dir weights/clip_pdbbind_finetuned --epoch 3 \
+    --pocket_pkl /path/to/h_pocket_4.pkl --ligand_pkl /path/to/h_ligands.pkl \
+    --output_dir /path/to/encodings
+```
+
+`eval/encode_benchmarks.py --dataset dude` does the same for DUD-E headlessly.
+
+Additionally, [`eval/lit_pcba_eval.py`](eval/lit_pcba_eval.py) scores a *different*,
+hydrogen-stripped per-complex pocket set (`pcba_sep_pocket_vecs.pkl`):
 
 ```bash
 python eval/lit_pcba_eval.py \
-    --model_dir weights/clip_pdbbind_finetuned --epoch 2 \
+    --model_dir weights/clip_pdbbind_finetuned --epoch 3 \
     --data_path /path/to/pcba_sep_pocket_vecs.pkl
 ```
-
-`eval/lit_pcba_labels_prep.ipynb` shows how that input pickle is built from
-docked poses.
 
 ## Retraining or reproducing the manuscript's numbers exactly
 

@@ -288,6 +288,37 @@ def ddp_setup(rank: int, world_size: int, port: str = "29500"):
 # Training Worker
 # ==============================================================================
 
+
+def save_training_state(model_save_path, epoch, model, optimizer, scheduler):
+    """Full training state, so a wall-clock kill can be resumed exactly."""
+    module = model.module if hasattr(model, 'module') else model
+    state = {
+        'epoch': epoch,
+        'model': module.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'scheduler': scheduler.state_dict(),
+    }
+    tmp_path = os.path.join(model_save_path, 'last_checkpoint.pt.tmp')
+    torch.save(state, tmp_path)
+    os.replace(tmp_path, os.path.join(model_save_path, 'last_checkpoint.pt'))
+
+
+def load_training_state(model_save_path, model, optimizer, scheduler, map_location=None):
+    """Restore from last_checkpoint.pt. Returns (start_epoch, val_losses)."""
+    ckpt_path = os.path.join(model_save_path, 'last_checkpoint.pt')
+    if not os.path.exists(ckpt_path):
+        return 0, []
+    state = torch.load(ckpt_path, map_location=map_location, weights_only=False)
+    module = model.module if hasattr(model, 'module') else model
+    module.load_state_dict(state['model'])
+    optimizer.load_state_dict(state['optimizer'])
+    scheduler.load_state_dict(state['scheduler'])
+    start_epoch = state['epoch'] + 1
+    losses_path = os.path.join(model_save_path, 'val_losses.npy')
+    val_losses = list(np.load(losses_path)[:start_epoch]) if os.path.exists(losses_path) else []
+    return start_epoch, val_losses
+
+
 def ddp_train(
     rank,
     world_size,
@@ -307,6 +338,7 @@ def ddp_train(
     load_weight_path,
     pocket_backbone_path,
     ligand_backbone_path,
+    resume,
 ):
     print(f"[rank {rank}] Starting DDP training.")
     ddp_setup(rank, world_size)
@@ -366,6 +398,17 @@ def ddp_train(
         optimizer, mode='min', factor=0.5, patience=5
     )
 
+    start_epoch, resumed_val_losses = 0, []
+    if resume:
+        os.makedirs(model_save_path, exist_ok=True)
+        start_epoch, resumed_val_losses = load_training_state(
+            model_save_path, model, optimizer, scheduler,
+            map_location={'cuda:0': f'cuda:{rank}'},
+        )
+        if rank == 0 and start_epoch:
+            print(f"Resuming from epoch {start_epoch}")
+    dist.barrier()
+
     # ---- Dataset & Splits ----
     full_dataset = SAIRDataset(data_path)
     train_dataset, val_dataset = torch.utils.data.random_split(
@@ -411,9 +454,9 @@ def ddp_train(
 
     # ---- Epoch Loop ----
     os.makedirs(model_save_path, exist_ok=True)
-    val_losses = []
+    val_losses = resumed_val_losses
 
-    for epoch in tqdm(range(n_epochs), disable=(rank != 0), desc="Epochs"):
+    for epoch in tqdm(range(start_epoch, n_epochs), disable=(rank != 0), desc="Epochs"):
         train_sampler.set_epoch(epoch)
 
         # -- Training --
@@ -532,6 +575,7 @@ def ddp_train(
                 os.path.join(model_save_path, "val_losses.npy"),
                 np.array(val_losses)
             )
+            save_training_state(model_save_path, epoch, model, optimizer, scheduler)
             torch.cuda.empty_cache()
 
     destroy_process_group()
@@ -549,6 +593,9 @@ if __name__ == '__main__':
         '--data_path', type=str, required=True,
         help='Path to the preprocessed SAIR pickle file (ligand/pocket coords + affinity labels)'
     )
+    parser.add_argument(
+        '--resume', action='store_true',
+        help='Resume from {model_save_path}/last_checkpoint.pt if it exists')
     parser.add_argument(
         '--model_save_path', type=str, default='clip-models/',
         help='Directory to save model checkpoints'
@@ -629,6 +676,7 @@ if __name__ == '__main__':
             args.load_weight_path,
             args.pocket_backbone_path,
             args.ligand_backbone_path,
+            args.resume,
         ),
         nprocs=args.world_size,
         join=True,

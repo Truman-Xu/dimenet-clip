@@ -1,7 +1,8 @@
 #!/bin/bash
 # Example SLURM job for Stage 3: self-supervised denoising pre-training
 # (pocket domain, matching the manuscript's reported configuration:
-# lr=1e-6, batch_size=8/GPU, unfrozen readout, world_size=8).
+# lr=1e-6, batch_size=8/GPU, readout frozen at its QM9 values, world_size=8;
+# the released pocket backbone's readout is bit-identical to the QM9 init).
 # Edit the #SBATCH directives, CONDA_ENV, and the --dataset_path/
 # --qm9_weights_dir arguments below for your cluster before submitting.
 #SBATCH --job-name=pocket_denoising
@@ -28,5 +29,5 @@ which python
     --name "pocket" \
     --dataset_path /path/to/output/pocket_data \
     --qm9_weights_dir ../weights/qm9_pretrained \
-    --world_size 8 --lr "1e-6" --batch_size 8 --unfreeze_readout \
+    --world_size 8 --lr "1e-6" --batch_size 8 \
     > denoising_train_$SLURM_JOBID.log 2>&1

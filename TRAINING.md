@@ -91,12 +91,28 @@ arguments; point them at your own copies:
 Raw source data (Uni-Mol ligand/pocket LMDB databases, SAIR, PDBBind, DUDE,
 LIT-PCBA) must be obtained separately from their respective providers.
 
-Note on stage 3 input naming: `train_denoising.py`'s single-process `train()`
-path reads `h_{name}_pos_train.pkl` / `h_z_{name}_train.pkl` (the direct
-output of `ligand_prep.py` / `pocket_prep.py` with hydrogens retained), while
-its multi-GPU `ddp_train()` path (used for the reported runs) reads
-`{name}_pos.pkl` / `z_{name}.pkl` from the same `--dataset_path` directory —
-name your training split accordingly depending on which entry point you use.
+Note on stage 3 input naming: both `train_denoising.py` entry points read the
+same four files that `ligand_prep.py` / `pocket_prep.py` write —
+`{prefix}{name}_pos_train.pkl`, `{prefix}z_{name}_train.pkl`,
+`{prefix}{name}_pos_valid.pkl`, `{prefix}z_{name}_valid.pkl` — where the prefix
+is set with `--file_prefix`. Use `--file_prefix h_` for data prepared with
+hydrogens retained (the prep scripts' default) and `--file_prefix ""` (the
+default) for data prepared with `--remove_hs`.
+
+Hydrogens: the released `weights/denoising_*` backbones were pre-trained on
+**hydrogen-stripped** structures, i.e. the prep scripts run with `--remove_hs`,
+even though the later CLIP stages and all benchmark evaluation use structures
+that retain hydrogens. Pass `--remove_hs` to both prep scripts to reproduce the
+released backbones.
+
+Reproducibility: `ligand_prep.py` samples `--n_total` molecules from the LMDB
+without replacement; pass `--seed` (default 42) to make that sample
+deterministic.
+
+Resuming: all three training scripts accept `--resume`, which restores model,
+optimizer, scheduler and epoch from `last_checkpoint.pt` in the output
+directory. It is safe to pass on a first run. Stage 3 takes days on 8 GPUs, so
+submit it with `--resume` from the start.
 
 ## Model weights
 
@@ -107,46 +123,69 @@ checkpoint per stage:
 | Directory | Contents | Notes |
 |---|---|---|
 | `weights/qm9_pretrained/` | `backbone_U.pt`, `readout_U.pt` | QM9-pretrained DimeNet, split into backbone/readout (initialization for Stage 3). Reproduce with `data_prep/qm9_pretrain.py`. |
-| `weights/denoising_ligand/` | `backbone_epoch_29.pt`, `ener_readout_epoch_29.pt` | Ligand-domain denoising pre-training, final saved epoch. |
-| `weights/denoising_pocket/` | `backbone_epoch_26.pt`, `ener_readout_epoch_26.pt` | Pocket-domain denoising pre-training, final saved epoch (unfrozen readout, lr=1e-6, as reported). |
-| `weights/clip_sair_pretrained/` | `dimenet_clip_epoch_98.pth`, `val_losses.npy` | SAIR contrastive pre-training, best validation-loss epoch (98/99, val loss 0.885). |
-| `weights/clip_pdbbind_finetuned/` | `dimenet_clip_epoch_2.pth`, `val_losses.npy` | PDBBind contrastive fine-tuning checkpoint used for the DUDE / LIT-PCBA evaluation notebooks in this repo (val loss 392.6; from a short 6-epoch run — see caveat below). |
+| `weights/denoising_ligand/` | `backbone_epoch_29.pt`, `ener_readout_epoch_29.pt` | Ligand-domain denoising pre-training, final saved epoch (readout trained jointly with the backbone). |
+| `weights/denoising_pocket/` | `backbone_epoch_26.pt`, `ener_readout_epoch_26.pt` | Pocket-domain denoising pre-training, final saved epoch (readout frozen at its QM9 values, lr=1e-6). |
+| `weights/clip_sair_pretrained/` | `dimenet_clip_epoch_5.pth`, `val_losses.npy` | SAIR contrastive pre-training, epoch 5 (val loss 0.416) — the checkpoint the reported PDBBind model was fine-tuned from. `val_losses.npy` covers the whole 100-epoch run (best: epoch 99, 0.136). |
+| `weights/clip_pdbbind_finetuned/` | `dimenet_clip_epoch_3.pth`, `val_losses.npy` | PDBBind contrastive fine-tuning — the model behind every DimeNet-CLIP number in the manuscript. Epoch 3 is the validation minimum (22.98) of a 9-epoch run. |
 
 All `.pth` DimeNetCLIP checkpoints are plain `state_dict`s (already unwrapped
 from `DistributedDataParallel`) and load directly with
 `model.load_state_dict(torch.load(path))`.
 
-**Caveat on `clip_pdbbind_finetuned`:** several PDBBind fine-tuning runs with
-different ablation settings were produced during development. The checkpoint
-published here is the one the DUDE/LIT-PCBA evaluation notebooks in `eval/`
-were actually run against. A separate, fully-converged 100-epoch run (best
-validation loss 94.5 at epoch 51) also exists; if you are trying to
-reproduce a specific number from the manuscript and it doesn't match, this
-is the first place to check.
+**Provenance:** each checkpoint above was traced to the exact run and epoch
+behind the manuscript's results, by re-encoding the benchmarks and matching
+embeddings to ~1e-7 and by nearest-neighbour parameter search for training
+parents. See [`weights/PROVENANCE.md`](weights/PROVENANCE.md). Two things
+about the released lineage are worth knowing when retraining: the ligand
+backbone is frozen in *both* contrastive stages (it is bit-identical to
+`denoising_ligand/backbone_epoch_29.pt`), and PDBBind fine-tuning started
+from an intermediate SAIR checkpoint (epoch 5), not the converged one.
 
 ## Running the pipeline
 
 ```bash
-# 1. Ligand data prep
-python data_prep/ligand_prep.py --lmdb_dir /path/to/unimol/ligands --output_dir /path/to/ligand_data
+# 1. Ligand data prep (--remove_hs reproduces the released backbones)
+python data_prep/ligand_prep.py --lmdb_dir /path/to/unimol/ligands \
+    --output_dir /path/to/denoising_data --remove_hs --seed 42
 
 # 2. Pocket data prep
-python data_prep/pocket_prep.py --lmdb_dir /path/to/unimol/pockets --output_dir /path/to/pocket_data
+python data_prep/pocket_prep.py --lmdb_dir /path/to/unimol/pockets \
+    --output_dir /path/to/denoising_data --remove_hs
 
-# 3. Denoising pre-training (single GPU)
-python train_denoising.py --name pocket --dataset_path /path/to/pocket_data \
-    --qm9_weights_dir weights/qm9_pretrained --unfreeze_readout --lr 1e-6 --batch_size 8
+# 3. Denoising pre-training (8-GPU DDP; see slurm/submit_denoise_train.sh).
+#    The released backbones trained the ligand readout and froze the pocket one.
+python train_denoising.py --name ligand --dataset_path /path/to/denoising_data \
+    --qm9_weights_dir weights/qm9_pretrained --save_dir /path/to/ligand_models \
+    --world_size 8 --unfreeze_readout --lr 1e-6 --batch_size 16 --resume
+python train_denoising.py --name pocket --dataset_path /path/to/denoising_data \
+    --qm9_weights_dir weights/qm9_pretrained --save_dir /path/to/pocket_models \
+    --world_size 8 --lr 1e-6 --batch_size 8 --resume
 
 # 4. CLIP pre-training on SAIR (multi-GPU DDP; see slurm/submit_clip_train_sair.sh)
 python train_clip_dimenet_sair.py --data_path /path/to/sair_preprocessed.pkl \
     --pocket_backbone_path weights/denoising_pocket/backbone_epoch_26.pt \
     --ligand_backbone_path weights/denoising_ligand/backbone_epoch_29.pt \
-    --freeze_ligand --world_size 8
+    --freeze_ligand --world_size 8 --batch_size 4 --affinity_cutoff -1.0 \
+    --max_pocket_atoms 300 --max_lig_atoms 100 --resume
 
 # 5. CLIP fine-tuning on PDBBind (multi-GPU DDP; see slurm/submit_clip_train_pdbbind.sh)
 python train_clip_dimenet_pdbbind.py --data_path /path/to/pdbbind_preprocessed.pkl \
-    --load_weight_path weights/clip_sair_pretrained/dimenet_clip_epoch_98.pth --world_size 8
+    --load_weight_path weights/clip_sair_pretrained/dimenet_clip_epoch_5.pth \
+    --world_size 8 --batch_size 16 --n_epochs 30 --affinity_cutoff 0 \
+    --freeze_ligand --resume
+
+# 6. Encode a benchmark with the fine-tuned checkpoint (bridges stage 5 to the figures)
+python eval/encode_benchmarks.py --model_dir clip-pdbbind-finetuned --epoch <best> \
+    --pocket_pkl /path/to/dude-pocket-4.pkl \
+    --ligand_pkl /path/to/dude-ligand-z-pos.pkl \
+    --output_dir /path/to/encodings
 ```
+
+Pick `<best>` as the `argmin` of `val_losses.npy` in the stage-4 / stage-5
+output directory. Stage 4 is initialized from the denoising backbones; passing
+`--load_weight_path` instead overrides that and initializes the entire CLIP
+model from an existing checkpoint — the two initialization paths are mutually
+exclusive.
 
 See `slurm/` for complete example job scripts matching the hyperparameters
 reported in the manuscript.
@@ -157,8 +196,15 @@ reported in the manuscript.
 DimeNetCLIP checkpoint, encode a benchmark's ligands/pockets, and report
 ROC-AUC and enrichment factor per target. `eval/lit_pcba_labels_prep.ipynb`
 shows how the LIT-PCBA input pickles are built from docked poses.
-`eval/eval_denoising.ipynb` sanity-checks the denoising-pretrained backbones
-before they're used to initialize Stage 4. Edit the configuration cell at
+`eval/encode_benchmarks.py` is the headless, scripted form of the encoding
+cells in `dude_eval.ipynb`: it writes the `*_ligand_encoded_ep{N}.pkl` and
+`*_pocket_encoded_ep{N}.pkl` pickles that the downstream per-target
+AUC-ROC / enrichment analysis consumes.
+`eval/eval_denoising.ipynb` sanity-checks a denoising backbone before it is
+used to initialize Stage 4 (note: as committed it loads
+`weights/qm9_pretrained/` and defines its own all-atom variant of
+`compute_denoising_loss`, so point it at `weights/denoising_*` and use the
+library loss if you want numbers comparable to training-time loss). Edit the configuration cell at
 the top of each notebook (or the `--model_dir`/`--data_path` flags of
 `lit_pcba_eval.py`) to point at your local copies of the benchmark data.
 

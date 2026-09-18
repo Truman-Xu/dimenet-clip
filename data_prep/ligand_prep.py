@@ -33,7 +33,14 @@ def process_data(data, remove_hs=False):
     return selected_coords, atomic_numbers, None
 
 
-def main(dataset_type, lmdb_dir, output_dir, n_total, n_train, remove_hs=False):
+def main(dataset_type, lmdb_dir, output_dir, n_total, n_train, remove_hs=False, seed=42):
+    if dataset_type == 'valid':
+        raise ValueError(
+            "--dataset_type valid would write the training split to the same filename as "
+            "the held-out split (both become '{prefix}ligand_pos_valid.pkl'). This script "
+            "samples one LMDB and writes BOTH splits, so read the train LMDB instead: "
+            "--dataset_type train."
+        )
     database_path = os.path.join(lmdb_dir, f'{dataset_type}.lmdb')
     env = lmdb.open(
         database_path, readonly=True, lock=False, subdir=False,
@@ -45,16 +52,21 @@ def main(dataset_type, lmdb_dir, output_dir, n_total, n_train, remove_hs=False):
     z_ligand = []
     z_valid = []
 
+    np.random.seed(seed)
     with env.begin() as txn:
         keys = list(txn.cursor().iternext(values=False))
         chosen_keys = choice(keys, size=n_total, replace=False)
-        train_keys = chosen_keys[:n_train]
-        valid_keys = chosen_keys[n_train:]
+        # Sort each split before reading. LMDB stores keys sorted in a B-tree, so reading a
+        # random sample in random order makes every get() a page fault; on a large database
+        # over a network filesystem that costs ~10x. Sorting restores sequential locality
+        # and does not change which records land in which split.
+        train_keys = sorted(chosen_keys[:n_train])
+        valid_keys = sorted(chosen_keys[n_train:])
 
         for idx in tqdm(train_keys):
             datapoint_pickled = txn.get(idx)
             data = pickle.loads(datapoint_pickled)
-            coords, atomic_numbers, failed_atoms = process_data(data)
+            coords, atomic_numbers, failed_atoms = process_data(data, remove_hs)
             if failed_atoms is not None:
                 failed.append((data['smi'], failed_atoms))
             else:
@@ -79,8 +91,12 @@ def main(dataset_type, lmdb_dir, output_dir, n_total, n_train, remove_hs=False):
         pickle.dump(ligand_pos, f)
     with open(os.path.join(output_dir, f'{prefix}z_ligand_{dataset_type}.pkl'), 'wb') as f:
         pickle.dump(z_ligand, f)
+    with open(os.path.join(output_dir, f'{prefix}ligand_pos_valid.pkl'), 'wb') as f:
+        pickle.dump(valid_pos, f)
+    with open(os.path.join(output_dir, f'{prefix}z_ligand_valid.pkl'), 'wb') as f:
+        pickle.dump(z_valid, f)
 
-    print(f'{dataset_type}: {len(failed)} failed')
+    print(f'{dataset_type}: {len(ligand_pos)} train, {len(valid_pos)} valid, {len(failed)} failed')
 
 
 if __name__ == "__main__":
@@ -104,10 +120,13 @@ if __name__ == "__main__":
         '--n_train', type=int, default=int(4.5e6),
         help='Number of sampled ligands assigned to the training split '
              '(the remainder becomes the validation split)')
-    parser.add_argument('--remove_hs', action='store_true', help='Strip hydrogens from validation split')
+    parser.add_argument('--remove_hs', action='store_true', help='Strip hydrogens from both splits')
+    parser.add_argument(
+        '--seed', type=int, default=42,
+        help='Seed for the without-replacement sample of LMDB keys')
     args = parser.parse_args()
 
     main(
         args.dataset_type, args.lmdb_dir, args.output_dir,
-        args.n_total, args.n_train, remove_hs=args.remove_hs,
+        args.n_total, args.n_train, remove_hs=args.remove_hs, seed=args.seed,
     )

@@ -24,5 +24,5 @@ which python
 
 "$CONDA_ENV/bin/python" ../eval/lit_pcba_eval.py \
     --model_dir ../weights/clip_pdbbind_finetuned \
-    --epoch 2 \
+    --epoch 3 \
     --data_path /path/to/pcba_sep_pocket_vecs.pkl
